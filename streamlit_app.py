@@ -524,16 +524,19 @@ def import_original_excel(filepath, athlete_id=None):
     while row < df.shape[0]:
         val0 = str(df.iloc[row, 0]).strip() if pd.notna(df.iloc[row, 0]) else ""
 
-        # 检测周类型行 (力量周/正式周/减载周/2月期等)
-        is_week_header = any(kw in val0 for kw in ["力量周", "正式周", "减载周", "周", "月期", "比赛期"])
-        # 也检查该行是否有日期在col 1
+        # 检测周头行: col0有非空值 且 不是时段行/备注行/统计行 且 col1有日期
+        val0_raw = str(df.iloc[row, 0]).strip() if pd.notna(df.iloc[row, 0]) else ""
+        skip_keywords = ["早上", "上午", "下午", "晚上", "备注", "mean or total", "drill", "load"]
+        is_skip = any(val0_raw.startswith(k) for k in skip_keywords)
+        is_week_header = bool(val0_raw) and not is_skip
         has_dates = False
         if is_week_header:
-            d1 = df.iloc[row, 1] if df.shape[1] > 1 else None
-            if pd.notna(d1):
-                d = parse_week_date(d1)
-                if d:
-                    has_dates = True
+            for check_col in [1, 5]:
+                if df.shape[1] > check_col:
+                    d_check = parse_week_date(df.iloc[row, check_col])
+                    if d_check:
+                        has_dates = True
+                        break
 
         if not (is_week_header and has_dates):
             row += 1
