@@ -482,126 +482,261 @@ def page_import():
             st.error("未找到原始Excel文件")
 
 def import_original_excel(filepath, athlete_id=None):
-    """解析陈伟雄负荷监控.xlsx 的周训练安排Sheet"""
+    """解析房力/陈伟雄负荷监控.xlsx - 重点解析负荷Sheet的历史数据"""
     sb = get_supabase()
     if not athlete_id:
         athlete = get_or_create_athlete()
         athlete_id = athlete["id"]
     aid = athlete_id
 
-    # 读取周训练安排
-    df = pd.read_excel(filepath, sheet_name="周训练安排", header=None)
+    # 读取负荷Sheet (真正的历史训练数据)
+    df = pd.read_excel(filepath, sheet_name="负荷", header=None)
     count = 0
 
-    # 寻找日期行 (Row 7: 5.25, 5.26, 5.27...)
-    # 注意: 5.25 是 float, 表示5月25日
-    date_cols = {}
-    for j in range(df.shape[1]):
-        v = df.iloc[7, j]
-        if pd.isna(v):
+    # 解析函数：将 YY.M.DD / YY.MM.DD / MM.DD 格式转为date
+    def parse_week_date(val):
+        if pd.isna(val):
+            return None
+        s = str(val).strip()
+        # 移除多余的换行
+        s = s.split('\n')[0].strip()
+        # 处理 float 如 22.9.26
+        try:
+            parts = s.replace('.', ' ').split()
+            if len(parts) == 1:
+                # 可能是 float: 22.9.26
+                pass
+        except:
+            pass
+
+        # 支持格式: 22.9.26, 24.8.19, 5.25
+        import re
+        m = re.match(r'(\d+)\.(\d+)\.?(\d+)?', s)
+        if m:
+            g1, g2, g3 = m.group(1), m.group(2), m.group(3)
+            # 判断: 如果第一段是2位数且>12, 是年份
+            n1 = int(g1)
+            n2 = int(g2)
+            if n1 > 31:  # 年份 (22, 24)
+                year = 2000 + n1
+                month = n2
+                day = int(g3) if g3 else 1
+            else:  # 可能是月.日 或 月.日
+                month = n1
+                day = n2
+                year = 2026
+            try:
+                from datetime import date
+                return date(year, month, day)
+            except:
+                return None
+        return None
+
+    # 行号迭代
+    row = 0
+    while row < df.shape[0]:
+        val0 = str(df.iloc[row, 0]).strip() if pd.notna(df.iloc[row, 0]) else ""
+
+        # 检测周类型行 (力量周/正式周/减载周/2月期等)
+        is_week_header = any(kw in val0 for kw in ["力量周", "正式周", "减载周", "周", "月期", "比赛期"])
+        # 也检查该行是否有日期在col 1
+        has_dates = False
+        if is_week_header:
+            d1 = df.iloc[row, 1] if df.shape[1] > 1 else None
+            if pd.notna(d1):
+                d = parse_week_date(d1)
+                if d:
+                    has_dates = True
+
+        if not (is_week_header and has_dates):
+            row += 1
             continue
-        if isinstance(v, str):
-            v = v.strip()
-            if v.replace(".", "").isdigit() and "." in v:
-                parts = v.split(".")
-                try:
-                    d = date(2026, int(parts[0]), int(parts[1]))
-                    date_cols[j] = d
-                except (ValueError, TypeError):
-                    pass
-        elif isinstance(v, (int, float)):
-            # 5.25 → month=5, day=25
-            m = int(v)
-            d_val = int(round((v - m) * 100))
-            if 1 <= m <= 12 and 1 <= d_val <= 31:
-                try:
-                    d = date(2026, m, d_val)
-                    date_cols[j] = d
-                except (ValueError, TypeError):
-                    pass
 
-    if not date_cols:
-        st.warning("未找到日期列")
-        return 0
+        # 这是新的一周数据
+        week_type = val0
+        dates = {}
+        for day_col in [1, 5, 9, 13, 17, 21, 25]:
+            if day_col < df.shape[1]:
+                d = parse_week_date(df.iloc[row, day_col])
+                if d:
+                    dates[day_col] = d
 
-    # 每组7列: Mon[6-11], Tue[12-17], Wed[18-23], Thu[24-29], Fri[30-35], Sat[36-41], Sun[42-47]
-    day_groups = [
-        (6, "周一"), (12, "周二"), (18, "周三"),
-        (24, "周四"), (30, "周五"), (36, "周六"), (42, "周日")
-    ]
-
-    for col_start, day_name in day_groups:
-        if col_start not in date_cols:
+        if not dates:
+            row += 1
             continue
-        d = date_cols[col_start]
 
-        # 读取该天的所有动作行
-        exercises = []
-        has_real_exercise = False
-        for i in range(10, df.shape[0]):
-            ename = df.iloc[i, col_start] if col_start < df.shape[1] else None
-            if pd.isna(ename):
-                continue
-            ename_str = str(ename).strip()
-            if ename_str in ("nan", ""):
-                continue
-            # 跳过备注/说明行
-            if ename_str.startswith("warm-up") or ename_str.startswith("热身") or \
-               ename_str.startswith("技术改善") or ename_str.startswith("把活动度"):
-                continue
-            # 跳过纯说明 (无组数)
-            sets_v = df.iloc[i, col_start + 1] if col_start + 1 < df.shape[1] else None
-            has_sets = sets_v is not None and pd.notna(sets_v) and str(sets_v).strip() not in ("", "nan")
-            if not has_sets and "专项技术" not in ename_str:
-                # 可能是备注行
+        # 跳过headers行(如果有)
+        next_row = row + 1
+        if next_row >= df.shape[0]:
+            break
+
+        # 检查下一行是否是子标题行 (含"Drill"/"Laod")
+        next_val = str(df.iloc[next_row, 1]).strip() if pd.notna(df.iloc[next_row, 1]) else ""
+        if "drill" in next_val.lower() or "load" in next_val.lower():
+            next_row += 1
+
+        # 读取4个时段的数据 (早上/上午/下午/晚上)
+        for _ in range(4):
+            if next_row >= df.shape[0]:
+                break
+            period_val = str(df.iloc[next_row, 0]).strip() if pd.notna(df.iloc[next_row, 0]) else ""
+            if period_val not in ("早上", "上午", "下午", "晚上"):
+                next_row += 1
                 continue
 
-            reps_v = df.iloc[i, col_start + 2] if col_start + 2 < df.shape[1] else None
-            inten_v = df.iloc[i, col_start + 3] if col_start + 3 < df.shape[1] else None
-            rest_v = df.iloc[i, col_start + 4] if col_start + 4 < df.shape[1] else None
-            actual_v = df.iloc[i, col_start + 5] if col_start + 5 < df.shape[1] else None
+            # 遍历每一天
+            for day_col, d in dates.items():
+                drill_col = day_col
+                rpe_col = day_col + 1
+                time_col = day_col + 2
+                load_col = day_col + 3
 
-            try:
-                sets_n = int(float(str(sets_v))) if sets_v is not None and str(sets_v).strip() not in ("", "nan") else 0
-            except (ValueError, TypeError):
-                sets_n = 0
-            reps_s = str(reps_v).strip() if reps_v is not None and str(reps_v).strip() not in ("", "nan") else ""
-            inten_s = str(inten_v).strip() if inten_v is not None and str(inten_v).strip() not in ("", "nan") else ""
-            try:
-                rest_f = float(str(rest_v)) if rest_v is not None and str(rest_v).strip() not in ("", "nan") else 0
-            except (ValueError, TypeError):
-                rest_f = 0
-            actual_s = str(actual_v).strip() if actual_v is not None and str(actual_v).strip() not in ("", "nan") else ""
+                drill_val = df.iloc[next_row, drill_col] if drill_col < df.shape[1] else None
+                if pd.isna(drill_val) or str(drill_val).strip() in ("", "nan", "无", "00", "0"):
+                    continue
 
-            exercises.append({
-                "name": ename_str, "sets": sets_n, "reps": reps_s,
-                "intensity": inten_s, "rest_min": rest_f, "actual": actual_s
-            })
-            has_real_exercise = True
+                drill_name = str(drill_val).strip()
+                if drill_name in ("nan", "", "无", "00", "0"):
+                    continue
 
-        if exercises and has_real_exercise:
-            rpe = 7
-            duration = min(len(exercises) * 15, 120)
-            period = "下午"
-            try:
-                sb.table("sessions").insert({
-                    "athlete_id": aid, "date": str(d), "period": period,
-                    "rpe": rpe, "duration_min": duration,
-                    "phase": "历史导入"
-                }).execute()
-                sid = sb.table("sessions").select("id").eq("athlete_id", aid).eq("date", str(d)).eq("period", period).order("id", desc=True).limit(1).execute().data[0]["id"]
-                for j, ex in enumerate(exercises):
-                    sb.table("session_exercises").insert({
-                        "session_id": sid, "exercise_name": ex["name"],
-                        "sets": ex["sets"], "reps": ex["reps"],
-                        "intensity": ex["intensity"], "rest_min": ex["rest_min"],
-                        "actual_completion": ex["actual"], "sort_order": j
+                # 解析RPE
+                try:
+                    rpe_v = float(str(df.iloc[next_row, rpe_col]).strip()) if rpe_col < df.shape[1] and pd.notna(df.iloc[next_row, rpe_col]) else 0
+                except (ValueError, TypeError):
+                    # RPE可能是个范围如 "3-6.5" → 取平均值
+                    rpe_str = str(df.iloc[next_row, rpe_col]).strip() if rpe_col < df.shape[1] and pd.notna(df.iloc[next_row, rpe_col]) else "0"
+                    import re
+                    nums = re.findall(r'[\d.]+', rpe_str)
+                    if nums:
+                        vals = [float(n) for n in nums]
+                        rpe_v = sum(vals) / len(vals)
+                    else:
+                        rpe_v = 0
+
+                # 解析时长
+                try:
+                    time_v = float(str(df.iloc[next_row, time_col]).strip()) if time_col < df.shape[1] and pd.notna(df.iloc[next_row, time_col]) else 0
+                except (ValueError, TypeError):
+                    time_v = 0
+
+                if rpe_v <= 0 or time_v <= 0:
+                    continue
+
+                # 写入数据库
+                try:
+                    sb.table("sessions").insert({
+                        "athlete_id": aid, "date": str(d), "period": period_val,
+                        "rpe": round(rpe_v, 1), "duration_min": int(round(time_v)),
+                        "phase": week_type, "notes": drill_name
                     }).execute()
-                count += 1
-            except Exception as e:
-                st.warning(f"{d} 导入失败: {e}")
+                    count += 1
+                except Exception as e:
+                    pass  # skip duplicates
 
-    return count
+            next_row += 1
+
+        # 跳过summary行 (mean or total) 和 notes行 (备注)
+        while next_row < df.shape[0]:
+            next_v0 = str(df.iloc[next_row, 0]).strip() if pd.notna(df.iloc[next_row, 0]) else ""
+            if next_v0 in ("", "nan") or "mean" in next_v0.lower() or "total" in next_v0.lower() or "备注" in next_v0 or "mean or total" in next_v0:
+                next_row += 1
+            else:
+                break
+
+        row = next_row
+
+    # 也解析周训练安排Sheet (周计划)
+    try:
+        df_plan = pd.read_excel(filepath, sheet_name="周训练安排", header=None)
+        plan_count = 0
+        date_cols = {}
+        for j in range(df_plan.shape[1]):
+            v = df_plan.iloc[7, j]
+            if pd.isna(v):
+                continue
+            if isinstance(v, str):
+                v = v.strip()
+                if v.replace(".", "").isdigit() and "." in v:
+                    parts = v.split(".")
+                    try:
+                        d = date(2026, int(parts[0]), int(parts[1]))
+                        date_cols[j] = d
+                    except:
+                        pass
+            elif isinstance(v, (int, float)):
+                m = int(v)
+                d_val = int(round((v - m) * 100))
+                if 1 <= m <= 12 and 1 <= d_val <= 31:
+                    try:
+                        d = date(2026, m, d_val)
+                        date_cols[j] = d
+                    except:
+                        pass
+
+        day_groups = [(6, "周一"), (12, "周二"), (18, "周三"),
+                       (24, "周四"), (30, "周五"), (36, "周六"), (42, "周日")]
+
+        for col_start, day_name in day_groups:
+            if col_start not in date_cols:
+                continue
+            d = date_cols[col_start]
+            exercises = []
+            for i in range(16, df_plan.shape[0]):
+                ename = df_plan.iloc[i, col_start] if col_start < df_plan.shape[1] else None
+                if pd.isna(ename):
+                    continue
+                ename_str = str(ename).strip()
+                if ename_str in ("nan", "") or ename_str.startswith("warm-up") or ename_str.startswith("热身") or ename_str.startswith("技术改善"):
+                    continue
+
+                sets_v = df_plan.iloc[i, col_start + 1] if col_start + 1 < df_plan.shape[1] else None
+                has_sets = sets_v is not None and pd.notna(sets_v) and str(sets_v).strip() not in ("", "nan")
+                if not has_sets:
+                    continue
+
+                reps_v = df_plan.iloc[i, col_start + 2] if col_start + 2 < df_plan.shape[1] else None
+                inten_v = df_plan.iloc[i, col_start + 3] if col_start + 3 < df_plan.shape[1] else None
+                rest_v = df_plan.iloc[i, col_start + 4] if col_start + 4 < df_plan.shape[1] else None
+                actual_v = df_plan.iloc[i, col_start + 5] if col_start + 5 < df_plan.shape[1] else None
+
+                try:
+                    sets_n = int(float(str(sets_v))) if sets_v is not None and str(sets_v).strip() not in ("", "nan") else 0
+                except:
+                    sets_n = 0
+                reps_s = str(reps_v).strip() if reps_v is not None and str(reps_v).strip() not in ("", "nan") else ""
+                inten_s = str(inten_v).strip() if inten_v is not None and str(inten_v).strip() not in ("", "nan") else ""
+                try:
+                    rest_f = float(str(rest_v)) if rest_v is not None and str(rest_v).strip() not in ("", "nan") else 0
+                except:
+                    rest_f = 0
+                actual_s = str(actual_v).strip() if actual_v is not None and str(actual_v).strip() not in ("", "nan") else ""
+
+                exercises.append({"name": ename_str, "sets": sets_n, "reps": reps_s,
+                                  "intensity": inten_s, "rest_min": rest_f, "actual": actual_s})
+
+            if exercises:
+                try:
+                    rpe = 7
+                    duration = min(len(exercises) * 15, 120)
+                    sb.table("sessions").insert({
+                        "athlete_id": aid, "date": str(d), "period": "下午",
+                        "rpe": rpe, "duration_min": duration, "phase": "历史周计划"
+                    }).execute()
+                    sid = sb.table("sessions").select("id").eq("athlete_id", aid).eq("date", str(d)).eq("period", "下午").order("id", desc=True).limit(1).execute().data[0]["id"]
+                    for j, ex in enumerate(exercises):
+                        sb.table("session_exercises").insert({
+                            "session_id": sid, "exercise_name": ex["name"],
+                            "sets": ex["sets"], "reps": ex["reps"],
+                            "intensity": ex["intensity"], "rest_min": ex["rest_min"],
+                            "actual_completion": ex["actual"], "sort_order": j
+                        }).execute()
+                    plan_count += 1
+                except:
+                    pass
+
+        return count + plan_count
+    except Exception:
+        return count
 
 # =========================================================
 # Page: 负荷分析
