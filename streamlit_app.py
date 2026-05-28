@@ -186,6 +186,12 @@ def get_exercise_library():
     r = sb.table("exercise_library").select("*").order("category").order("subcategory").execute()
     return r.data or []
 
+def delete_session(session_id):
+    """删除训练课及关联的动作明细"""
+    sb = get_supabase()
+    sb.table("session_exercises").delete().eq("session_id", session_id).execute()
+    sb.table("sessions").delete().eq("id", session_id).execute()
+
 def get_all_athletes():
     sb = get_supabase_read()
     r = sb.table("athletes").select("*").order("name").execute()
@@ -892,18 +898,27 @@ def page_analysis():
         records = []
         for s in sessions:
             exs = s.get("exercises", [])
-            ex_names = ", ".join([e["exercise_name"] for e in exs[:5]])
-            if len(exs) > 5:
-                ex_names += f"... (+{len(exs)-5})"
-            records.append({
-                "日期": s["date"], "时段": s["period"],
-                "RPE": s["rpe"], "时长": f'{s["duration_min"]}min',
-                "负荷(AU)": s["rpe"] * s["duration_min"],
-                "动作": ex_names,
-                "阶段": s.get("phase", ""),
-            })
-        df_rec = pd.DataFrame(records)
-        st.dataframe(df_rec, use_container_width=True, hide_index=True)
+            ex_names = ", ".join([e["exercise_name"] for e in exs[:3]])
+            if len(exs) > 3:
+                ex_names += f"... (+{len(exs)-3})"
+            sid = s["id"]
+            del_key = f"del_{sid}"
+            if del_key not in st.session_state:
+                st.session_state[del_key] = False
+
+            col_r, col_d = st.columns([5, 1])
+            with col_r:
+                with st.expander(f"**{s['date']}** {s['period']} | RPE{s['rpe']} | {s['duration_min']}min | 负荷{s['rpe']*s['duration_min']}AU | {s.get('phase','')}"):
+                    st.caption(f"动作: {ex_names}")
+                    if s.get("notes"):
+                        st.caption(f"笔记: {s['notes']}")
+                    if st.button(f"🗑️ 删除此记录", key=f"del_btn_{sid}", type="secondary", use_container_width=True):
+                        delete_session(sid)
+                        compute_weekly_loads(aid)
+                        st.success("已删除")
+                        st.rerun()
+
+        st.caption(f"共 {len(sessions)} 条训练记录")
 
 # =========================================================
 # Page: 动作库
@@ -1073,6 +1088,23 @@ def page_athletes():
                         clean_2rm=e_clean, squat_2rm=e_squat,
                         body_weight=e_weight, body_fat=e_bf, notes=e_notes)
                     st.success("已保存")
+                    st.rerun()
+
+        # 清空数据
+        st.markdown("---")
+        st.subheader("⚠️ 危险操作")
+        with st.expander("清空训练数据", expanded=False):
+            st.warning(f"这将删除「{aname}」**所有训练记录**，不可恢复！")
+            confirm = st.text_input("输入「DELETE」确认", placeholder="DELETE")
+            if st.button("🗑️ 清空所有训练数据", type="secondary", use_container_width=True, disabled=(confirm != "DELETE")):
+                if confirm == "DELETE":
+                    sb = get_supabase()
+                    sids = [s["id"] for s in sb.table("sessions").select("id").eq("athlete_id", aid).execute().data or []]
+                    if sids:
+                        sb.table("session_exercises").delete().in_("session_id", sids).execute()
+                    sb.table("sessions").delete().eq("athlete_id", aid).execute()
+                    sb.table("weekly_loads").delete().eq("athlete_id", aid).execute()
+                    st.success("已清空")
                     st.rerun()
 
 # =========================================================
