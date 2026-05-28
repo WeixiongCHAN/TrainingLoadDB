@@ -630,7 +630,26 @@ def import_original_excel(filepath, athlete_id=None):
 
             next_row += 1
 
-        # 跳过summary行 (mean or total) 和 notes行 (备注)
+        # 解析备注行（训练日记）- 在跳过之前提取
+        diary_notes = {}
+        if next_row < df.shape[0]:
+            next_v0 = str(df.iloc[next_row, 0]).strip() if pd.notna(df.iloc[next_row, 0]) else ""
+            if "备注" in next_v0:
+                for day_col, d in dates.items():
+                    if day_col < df.shape[1]:
+                        note_v = df.iloc[next_row, day_col]
+                        if pd.notna(note_v):
+                            note_text = str(note_v).strip()
+                            if note_text and note_text not in ("nan", ""):
+                                diary_notes[str(d)] = note_text
+                                # 写入日记
+                                try:
+                                    sb.table("sessions").update({"notes": note_text}).eq("athlete_id", aid).eq("date", str(d)).execute()
+                                except:
+                                    pass
+                next_row += 1
+
+        # 跳过剩余summary/备注行
         while next_row < df.shape[0]:
             next_v0 = str(df.iloc[next_row, 0]).strip() if pd.notna(df.iloc[next_row, 0]) else ""
             if next_v0 in ("", "nan") or "mean" in next_v0.lower() or "total" in next_v0.lower() or "备注" in next_v0 or "mean or total" in next_v0:
@@ -845,6 +864,77 @@ def page_library():
                         st.error(str(e))
 
 # =========================================================
+# Page: 训练日记
+# =========================================================
+def page_diary():
+    st.subheader("📓 训练日记")
+    aid, aname = get_active_athlete()
+
+    # 获取所有有备注的训练记录
+    sb = get_supabase_read()
+    r = sb.table("sessions").select("date,period,rpe,duration_min,phase,notes,created_at").eq("athlete_id", aid).neq("notes", "").order("date", desc=True).execute()
+    notes = [s for s in (r.data or []) if s.get("notes", "").strip() and len(s["notes"].strip()) > 3]
+
+    if not notes:
+        st.info("暂无训练日记，导入数据时会自动提取备注内容")
+        return
+
+    # 统计
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        st.metric("日记条数", len(notes))
+    with c2:
+        dates_covered = len(set(n["date"] for n in notes))
+        st.metric("有记录的天数", dates_covered)
+    with c3:
+        total_chars = sum(len(n["notes"]) for n in notes)
+        st.metric("总字数", total_chars)
+
+    st.markdown("---")
+
+    # 关键词追踪
+    body_parts = {
+        "小腿": 0, "膝盖": 0, "脚踝": 0, "腰": 0, "肩": 0,
+        "髋": 0, "手腕": 0, "背部": 0, "大腿": 0,
+    }
+    mood_words = {
+        "好": 0, "轻松": 0, "不错": 0, "进步": 0,
+        "累": 0, "痛": 0, "酸": 0, "差": 0, "难受": 0,
+    }
+
+    for n in notes:
+        text = n.get("notes", "")
+        for kw in body_parts:
+            if kw in text:
+                body_parts[kw] += 1
+        for kw in mood_words:
+            if kw in text:
+                mood_words[kw] += 1
+
+    col1, col2 = st.columns(2)
+    with col1:
+        st.caption("**身体部位提及**")
+        bp_df = pd.DataFrame(sorted(body_parts.items(), key=lambda x: -x[1]), columns=["部位", "次数"])
+        bp_df = bp_df[bp_df["次数"] > 0]
+        if not bp_df.empty:
+            st.dataframe(bp_df, use_container_width=True, hide_index=True)
+    with col2:
+        st.caption("**状态关键词**")
+        mw_df = pd.DataFrame(sorted(mood_words.items(), key=lambda x: -x[1]), columns=["关键词", "次数"])
+        mw_df = mw_df[mw_df["次数"] > 0]
+        if not mw_df.empty:
+            st.dataframe(mw_df, use_container_width=True, hide_index=True)
+
+    st.markdown("---")
+
+    # 按日期展示日记
+    st.subheader("📖 训练日记全文")
+    for n in notes:
+        note_text = n["notes"].strip()
+        with st.expander(f"**{n['date']}** {n['period']} | RPE {n['rpe']} | {n.get('phase', '')}"):
+            st.write(note_text)
+
+# =========================================================
 # Page: 运动员管理
 # =========================================================
 def page_athletes():
@@ -931,7 +1021,8 @@ if athletes_list:
         st.rerun()
 
 menu = st.sidebar.radio("导航", [
-    "📊 总览看板", "📝 训练录入", "📤 导入数据",
+    "📊 总览看板", "📝 训练录入", "📓 训练日记",
+    "📤 导入数据",
     "📈 负荷分析", "📚 动作库", "🏃 运动员管理"
 ])
 
@@ -939,6 +1030,8 @@ if menu == "📊 总览看板":
     page_dashboard()
 elif menu == "📝 训练录入":
     page_entry()
+elif menu == "📓 训练日记":
+    page_diary()
 elif menu == "📤 导入数据":
     page_import()
 elif menu == "📈 负荷分析":
