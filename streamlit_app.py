@@ -86,7 +86,7 @@ def add_session(date_val, period, rpe, duration, exercises=None, phase="", notes
             }).execute()
     return session_id
 
-def get_sessions(athlete_id, limit=200):
+def get_sessions(athlete_id, limit=500):
     sb = get_supabase_read()
     r = sb.table("sessions").select("*").eq("athlete_id", athlete_id).order("date", desc=True).limit(limit).execute()
     return r.data or []
@@ -96,7 +96,7 @@ def get_exercises_for_session(session_id):
     r = sb.table("session_exercises").select("*").eq("session_id", session_id).order("sort_order").execute()
     return r.data or []
 
-def get_all_sessions_with_exercises(athlete_id, limit=200):
+def get_all_sessions_with_exercises(athlete_id, limit=500):
     """获取训练课+动作明细（关联查询）"""
     sessions = get_sessions(athlete_id, limit)
     sid_map = {s["id"]: s for s in sessions}
@@ -266,7 +266,7 @@ def page_dashboard():
             st.success("已计算")
             st.rerun()
 
-    sessions = get_all_sessions_with_exercises(aid, 10)
+    sessions = get_all_sessions_with_exercises(aid)  # 默认500条
     if sessions:
         for s in sessions[:5]:
             with st.expander(f"**{s['date']}** {s['period']} | RPE {s['rpe']} | {s['duration_min']}min | 负荷{s['rpe']*s['duration_min']}AU", expanded=False):
@@ -288,11 +288,11 @@ def page_dashboard():
     # 周负荷图表
     st.markdown("---")
     st.subheader("📈 周负荷趋势")
-    weekly = get_weekly_loads(aid, 20)
+    weekly = get_weekly_loads(aid, 50)
     weekly.reverse()  # 按时间正序
     if weekly:
         df = pd.DataFrame(weekly)
-        df["label"] = df["week_start"].apply(lambda x: str(x)[5:])
+        df["label"] = df["week_start"].apply(lambda x: str(x)[:10])  # 含年份: 2022-09-26
 
         # ACWR 图表
         fig = make_subplots(rows=2, cols=1, shared_xaxes=True,
@@ -741,13 +741,13 @@ def page_analysis():
     aid, aname = get_active_athlete()
 
     compute_weekly_loads(aid)
-    weekly = get_weekly_loads(aid, 30)
+    weekly = get_weekly_loads(aid, 60)
     if not weekly:
         st.info("暂无数据，请先录入训练")
         return
 
     df = pd.DataFrame(weekly)
-    df["label"] = df["week_start"].apply(lambda x: str(x)[5:])
+    df["label"] = df["week_start"].apply(lambda x: str(x)[:10])  # 含年份
     df = df.sort_values("week_start")
 
     # ACWR 状态分布饼图
@@ -790,7 +790,7 @@ def page_analysis():
 
     # 原始训练记录
     st.subheader("📋 全部训练记录")
-    sessions = get_all_sessions_with_exercises(aid, 200)
+    sessions = get_all_sessions_with_exercises(aid, 500)
     if sessions:
         records = []
         for s in sessions:
