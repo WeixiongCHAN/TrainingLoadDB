@@ -807,6 +807,91 @@ def page_analysis():
     display["ACWR状态"] = recent["acwr_status"]
     st.dataframe(display, use_container_width=True, hide_index=True)
 
+    # =====================================================
+    # 周内疲劳波动 (每日负荷详情)
+    # =====================================================
+    st.markdown("---")
+    st.subheader("📊 周内疲劳波动")
+    st.caption("选择一周查看每日训练负荷分布")
+
+    week_options = {row["label"]: row["week_start"] for _, row in df.iterrows()}
+    week_options = dict(list(week_options.items())[::-1])  # 最新的在前
+    sel_week_label = st.selectbox("选择周", list(week_options.keys()), index=0)
+    sel_week_start = week_options[sel_week_label]
+
+    # 计算该周的结束日 (周日)
+    from datetime import timedelta
+    ws_date = pd.to_datetime(sel_week_start).date()
+    we_date = ws_date + timedelta(days=6)
+
+    # 查询该周每日负荷
+    sb = get_supabase_read()
+    r = sb.table("sessions").select("date,period,rpe,duration_min,notes").eq("athlete_id", aid).gte("date", str(ws_date)).lte("date", str(we_date)).order("date").execute()
+    week_sessions = r.data or []
+
+    if week_sessions:
+        df_day = pd.DataFrame(week_sessions)
+        df_day["date"] = pd.to_datetime(df_day["date"])
+        df_day["projected_load"] = df_day["rpe"] * df_day["duration_min"]
+
+        # 按日汇总
+        daily = df_day.groupby(df_day["date"].dt.date).agg(
+            日负荷=("projected_load", "sum"),
+            训练次数=("rpe", "count"),
+            平均RPE=("rpe", "mean"),
+            总时长=("duration_min", "sum"),
+        ).reset_index()
+        daily.columns = ["日期", "日负荷", "训练次数", "平均RPE", "总时长"]
+        daily["星期"] = daily["日期"].apply(lambda x: ["一","二","三","四","五","六","日"][x.weekday()])
+        daily["标签"] = daily.apply(lambda r: f"{r['日期']} 周{r['星期']}", axis=1)
+
+        col_chart, col_detail = st.columns([2, 1])
+
+        with col_chart:
+            # 日负荷柱状图 + RPE叠加
+            fig_day = make_subplots(specs=[[{"secondary_y": True}]])
+            fig_day.add_trace(go.Bar(
+                x=daily["标签"], y=daily["日负荷"],
+                name="日负荷(AU)", marker_color="#4ecdc4",
+                text=daily["日负荷"].round(1),
+                textposition="outside",
+            ), secondary_y=False)
+            fig_day.add_trace(go.Scatter(
+                x=daily["标签"], y=daily["平均RPE"],
+                name="平均RPE", mode="lines+markers",
+                line=dict(color="#ff6b6b", width=3),
+                marker=dict(size=10),
+            ), secondary_y=True)
+            fig_day.add_hline(y=sum(daily["日负荷"])/max(len(daily),1), line_dash="dot",
+                              line_color="#888", annotation_text="日均负荷")
+            fig_day.update_layout(
+                title=f"{sel_week_label} 每日负荷分布",
+                template="plotly_dark", height=350,
+                xaxis_title="", yaxis_title="负荷(AU)",
+                hovermode="x unified",
+            )
+            fig_day.update_yaxes(title_text="负荷(AU)", secondary_y=False)
+            fig_day.update_yaxes(title_text="平均RPE", secondary_y=True, range=[0, 10])
+            st.plotly_chart(fig_day, use_container_width=True)
+
+        with col_detail:
+            st.caption("**每日明细**")
+            for _, row_d in daily.iterrows():
+                rpe_stars = "🔴" * min(int(round(row_d["平均RPE"])), 5) + "⚪" * max(0, 5 - min(int(round(row_d["平均RPE"])), 5))
+                st.markdown(f"**周{row_d['星期']}** {row_d['日期']}")
+                st.caption(f"负荷{row_d['日负荷']:.0f}AU | RPE{row_d['平均RPE']:.1f} {rpe_stars}")
+            st.caption(f"**周总负荷**: {daily['日负荷'].sum():.0f}AU | **训练{len(week_sessions)}次**")
+
+        # 时段分布
+        st.caption("**时段分布**")
+        period_order = ["早上", "上午", "下午", "晚上"]
+        period_counts = df_day["period"].value_counts()
+        period_df = pd.DataFrame({"时段": period_order, "次数": [period_counts.get(p, 0) for p in period_order]})
+        st.dataframe(period_df, use_container_width=True, hide_index=True)
+
+    else:
+        st.info("该周无训练数据")
+
     # 原始训练记录
     st.subheader("📋 全部训练记录")
     sessions = get_all_sessions_with_exercises(aid, 500)
