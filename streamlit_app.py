@@ -186,13 +186,43 @@ def get_exercise_library():
     r = sb.table("exercise_library").select("*").order("category").order("subcategory").execute()
     return r.data or []
 
+def get_all_athletes():
+    sb = get_supabase_read()
+    r = sb.table("athletes").select("*").order("name").execute()
+    return r.data or []
+
+def create_athlete(name, goal="", touch_cm=0, target_cm=0):
+    sb = get_supabase()
+    try:
+        r = sb.table("athletes").insert({
+            "name": name, "goal": goal,
+            "current_touch_cm": touch_cm, "target_touch_cm": target_cm
+        }).execute()
+        return r.data[0], None
+    except Exception as e:
+        return None, str(e)
+
+def get_active_athlete():
+    """从session_state获取当前选中的运动员，不存在则用默认"""
+    if "athlete_id" not in st.session_state:
+        athletes = get_all_athletes()
+        if athletes:
+            st.session_state.athlete_id = athletes[0]["id"]
+            st.session_state.athlete_name = athletes[0]["name"]
+        else:
+            # 自动创建默认
+            a = get_or_create_athlete()
+            st.session_state.athlete_id = a["id"]
+            st.session_state.athlete_name = a["name"]
+    return st.session_state.athlete_id, st.session_state.athlete_name
+
 # =========================================================
 # Page: 总览看板
 # =========================================================
 def page_dashboard():
     st.subheader("📊 训练总览")
-    athlete = get_or_create_athlete()
-    aid = athlete["id"]
+    aid, aname = get_active_athlete()
+    athlete = get_supabase_read().table("athletes").select("*").eq("id", aid).execute().data[0]
 
     # 运动员信息卡片
     c1, c2, c3, c4 = st.columns(4)
@@ -317,8 +347,7 @@ def page_entry():
     common_exercises = ["摸高", "后蹲", "高翻", "冲刺", "跳箱", "保加利亚蹲",
                         "硬拉", "卧推", "引体向上", "实力推", "北欧落", "举重拉"]
 
-    athlete = get_or_create_athlete()
-    aid = athlete["id"]
+    aid, aname = get_active_athlete()
 
     with st.form("entry_form"):
         col1, col2, col3, col4 = st.columns(4)
@@ -409,9 +438,9 @@ def page_import():
             if st.button("解析并导入", type="primary", use_container_width=True):
                 with st.spinner("正在解析..."):
                     try:
-                        count = import_original_excel(tmp_path)
-                        athlete = get_or_create_athlete()
-                        compute_weekly_loads(athlete["id"])
+                        aid, aname = get_active_athlete()
+                        count = import_original_excel(tmp_path, aid)
+                        compute_weekly_loads(aid)
                         st.success(f"✅ 成功导入 {count} 条训练记录 (含动作明细)")
                     except Exception as e:
                         st.error(f"导入失败: {e}")
@@ -452,11 +481,13 @@ def page_import():
         else:
             st.error("未找到原始Excel文件")
 
-def import_original_excel(filepath):
+def import_original_excel(filepath, athlete_id=None):
     """解析陈伟雄负荷监控.xlsx 的周训练安排Sheet"""
-    athlete = get_or_create_athlete()
-    aid = athlete["id"]
     sb = get_supabase()
+    if not athlete_id:
+        athlete = get_or_create_athlete()
+        athlete_id = athlete["id"]
+    aid = athlete_id
 
     # 读取周训练安排
     df = pd.read_excel(filepath, sheet_name="周训练安排", header=None)
@@ -577,8 +608,7 @@ def import_original_excel(filepath):
 # =========================================================
 def page_analysis():
     st.subheader("📈 负荷深度分析")
-    athlete = get_or_create_athlete()
-    aid = athlete["id"]
+    aid, aname = get_active_athlete()
 
     compute_weekly_loads(aid)
     weekly = get_weekly_loads(aid, 30)
@@ -685,6 +715,69 @@ def page_library():
                         st.error(str(e))
 
 # =========================================================
+# Page: 运动员管理
+# =========================================================
+def page_athletes():
+    st.subheader("🏃 运动员管理")
+    athletes = get_all_athletes()
+
+    # 已有运动员列表
+    if athletes:
+        df = pd.DataFrame(athletes)
+        cols = ["name", "goal", "current_touch_cm", "target_touch_cm", "clean_2rm", "squat_2rm"]
+        df_disp = df[cols].copy()
+        df_disp.columns = ["姓名", "目标", "当前摸高(cm)", "目标摸高(cm)", "高翻2RM", "后蹲2RM"]
+        st.dataframe(df_disp, use_container_width=True, hide_index=True)
+    else:
+        st.info("暂无运动员")
+
+    # 添加新运动员
+    with st.expander("➕ 添加新运动员", expanded=not bool(athletes)):
+        with st.form("add_athlete"):
+            col1, col2 = st.columns(2)
+            with col1:
+                new_name = st.text_input("姓名 *", placeholder="如: 张三")
+                new_goal = st.text_input("目标", placeholder="如: 摸高300cm")
+            with col2:
+                new_touch = st.number_input("当前摸高(cm)", 0.0, 400.0, 0.0, step=1.0)
+                new_target = st.number_input("目标摸高(cm)", 0.0, 400.0, 0.0, step=1.0)
+            if st.form_submit_button("添加", type="primary", use_container_width=True) and new_name:
+                a, err = create_athlete(new_name, new_goal, new_touch, new_target)
+                if a:
+                    st.success(f"已添加「{new_name}」")
+                    st.rerun()
+                else:
+                    st.error(err)
+
+    # 编辑当前运动员信息
+    if athletes:
+        st.markdown("---")
+        st.subheader("✏️ 编辑运动员信息")
+        aid, aname = get_active_athlete()
+        a = next((x for x in athletes if x["id"] == aid), None)
+        if a:
+            with st.form("edit_athlete"):
+                col1, col2 = st.columns(2)
+                with col1:
+                    e_name = st.text_input("姓名", value=a["name"])
+                    e_goal = st.text_input("目标", value=a.get("goal", ""))
+                    e_touch = st.number_input("当前摸高(cm)", value=float(a.get("current_touch_cm", 0)), step=1.0)
+                    e_target = st.number_input("目标摸高(cm)", value=float(a.get("target_touch_cm", 0)), step=1.0)
+                with col2:
+                    e_clean = st.number_input("高翻2RM(kg)", value=float(a.get("clean_2rm", 0)), step=1.0)
+                    e_squat = st.number_input("后蹲2RM(kg)", value=float(a.get("squat_2rm", 0)), step=1.0)
+                    e_weight = st.number_input("体重(kg)", value=float(a.get("body_weight", 78)), step=1.0)
+                    e_bf = st.number_input("体脂率(%)", value=float(a.get("body_fat", 0)), step=0.1)
+                e_notes = st.text_area("备注", value=a.get("notes", ""))
+                if st.form_submit_button("💾 保存修改", type="primary", use_container_width=True):
+                    update_athlete(aid, name=e_name, goal=e_goal,
+                        current_touch_cm=e_touch, target_touch_cm=e_target,
+                        clean_2rm=e_clean, squat_2rm=e_squat,
+                        body_weight=e_weight, body_fat=e_bf, notes=e_notes)
+                    st.success("已保存")
+                    st.rerun()
+
+# =========================================================
 # Main App
 # =========================================================
 st.set_page_config(page_title="运动负荷监控", layout="wide")
@@ -694,9 +787,22 @@ if not SUPABASE_URL or not SUPABASE_KEY:
     st.error("❌ 未配置Supabase连接信息")
     st.stop()
 
+# 侧边栏：运动员选择
+athletes_list = get_all_athletes()
+if athletes_list:
+    athlete_names = [a["name"] for a in athletes_list]
+    current_id, current_name = get_active_athlete()
+    default_idx = next((i for i, a in enumerate(athletes_list) if a["id"] == current_id), 0)
+    sel_name = st.sidebar.selectbox("🏃 运动员", athlete_names, index=default_idx)
+    sel_athlete = next(a for a in athletes_list if a["name"] == sel_name)
+    if sel_athlete["id"] != st.session_state.get("athlete_id"):
+        st.session_state.athlete_id = sel_athlete["id"]
+        st.session_state.athlete_name = sel_athlete["name"]
+        st.rerun()
+
 menu = st.sidebar.radio("导航", [
     "📊 总览看板", "📝 训练录入", "📤 导入数据",
-    "📈 负荷分析", "📚 动作库"
+    "📈 负荷分析", "📚 动作库", "🏃 运动员管理"
 ])
 
 if menu == "📊 总览看板":
@@ -709,7 +815,9 @@ elif menu == "📈 负荷分析":
     page_analysis()
 elif menu == "📚 动作库":
     page_library()
+elif menu == "🏃 运动员管理":
+    page_athletes()
 
 st.sidebar.markdown("---")
-st.sidebar.caption("陈伟雄 · 摸高295→315")
+st.sidebar.caption(f"当前: {st.session_state.get('athlete_name', '陈伟雄')}")
 st.sidebar.caption(f"数据源: Supabase Cloud")
