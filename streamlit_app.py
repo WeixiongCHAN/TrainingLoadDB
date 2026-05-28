@@ -199,8 +199,8 @@ def page_dashboard():
     with c1:
         with st.expander("🏃 运动员", expanded=True):
             st.metric("摸高", f'{athlete["current_touch_cm"]}cm', f'目标{athlete["target_touch_cm"]}cm')
-            new_touch = st.number_input("当前摸高", value=float(athlete["current_touch_cm"]), step=1)
-            new_target = st.number_input("目标摸高", value=float(athlete["target_touch_cm"]), step=1)
+            new_touch = st.number_input("当前摸高", value=float(athlete["current_touch_cm"]), step=1.0)
+            new_target = st.number_input("目标摸高", value=float(athlete["target_touch_cm"]), step=1.0)
             if st.button("更新", use_container_width=True):
                 update_athlete(aid, current_touch_cm=new_touch, target_touch_cm=new_target)
                 st.success("✓")
@@ -209,8 +209,8 @@ def page_dashboard():
         with st.expander("💪 力量数据", expanded=True):
             st.metric("高翻 2RM", f'{athlete["clean_2rm"]}kg')
             st.metric("后蹲 2RM", f'{athlete["squat_2rm"]}kg')
-            new_clean = st.number_input("高翻", value=float(athlete["clean_2rm"]), step=1)
-            new_squat = st.number_input("后蹲", value=float(athlete["squat_2rm"]), step=1)
+            new_clean = st.number_input("高翻", value=float(athlete["clean_2rm"]), step=1.0)
+            new_squat = st.number_input("后蹲", value=float(athlete["squat_2rm"]), step=1.0)
             if st.button("更新力量", use_container_width=True):
                 update_athlete(aid, clean_2rm=new_clean, squat_2rm=new_squat)
                 st.success("✓")
