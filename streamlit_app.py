@@ -495,42 +495,29 @@ def import_original_excel(filepath, athlete_id=None):
 
     # 解析函数：将 YY.M.DD / YY.MM.DD / MM.DD 格式转为date
     def parse_week_date(val):
+        """解析日期: 22.9.26→2022-09-26, 24.8.19→2024-08-19, 5.25→2026-05-25"""
         if pd.isna(val):
             return None
-        s = str(val).strip()
-        # 移除多余的换行
-        s = s.split('\n')[0].strip()
-        # 处理 float 如 22.9.26
-        try:
-            parts = s.replace('.', ' ').split()
-            if len(parts) == 1:
-                # 可能是 float: 22.9.26
-                pass
-        except:
-            pass
-
-        # 支持格式: 22.9.26, 24.8.19, 5.25
+        s = str(val).strip().split('\n')[0].strip()
         import re
         m = re.match(r'(\d+)\.(\d+)\.?(\d+)?', s)
-        if m:
-            g1, g2, g3 = m.group(1), m.group(2), m.group(3)
-            # 判断: 如果第一段是2位数且>12, 是年份
-            n1 = int(g1)
-            n2 = int(g2)
-            if n1 > 31:  # 年份 (22, 24)
-                year = 2000 + n1
-                month = n2
-                day = int(g3) if g3 else 1
-            else:  # 可能是月.日 或 月.日
-                month = n1
-                day = n2
-                year = 2026
+        if not m:
+            return None
+        g1, g2, g3 = int(m.group(1)), int(m.group(2)), m.group(3)
+        # 3段: YY.M.D → 年份.月.日
+        if g3 is not None:
+            year = 2000 + g1 if g1 < 100 else g1
             try:
                 from datetime import date
-                return date(year, month, day)
+                return date(year, g2, int(g3))
             except:
                 return None
-        return None
+        # 2段: M.D → 月.日 (年份用2026)
+        try:
+            from datetime import date
+            return date(2026, g1, g2)
+        except:
+            return None
 
     # 行号迭代
     row = 0
@@ -620,6 +607,11 @@ def import_original_excel(filepath, athlete_id=None):
                     time_v = 0
 
                 if rpe_v <= 0 or time_v <= 0:
+                    continue
+
+                # 去重: 检查是否已存在
+                existing = sb.table("sessions").select("id").eq("athlete_id", aid).eq("date", str(d)).eq("period", period_val).eq("rpe", round(rpe_v, 1)).eq("duration_min", int(round(time_v))).execute()
+                if existing.data:
                     continue
 
                 # 写入数据库
